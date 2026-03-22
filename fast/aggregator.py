@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
-from models import FinalSignal, SentimentScored
+from models import FinalSignal, SentimentScored, SourceEvidence
 
 # ---------------------------------------------------------------------------
 # Configurable thresholds
@@ -180,6 +180,23 @@ def aggregate_signals(messages: list[SentimentScored]) -> FinalSignal:
             "weight_pct": weight_pct,
         }
 
+    # --- Step 6: build supporting sources (sorted by weight, highest first) ---
+    evidence = []
+    for msg, w in zip(messages, weights):
+        evidence.append((w, SourceEvidence(
+            source_name=msg.source_name,
+            source_category=_categorize_source(msg.source_name),
+            text=msg.text,
+            sentiment_score=round(msg.finbert_score, 4),
+            sentiment_direction=msg.direction,
+            confidence=round(msg.finbert_confidence, 4),
+            credibility_weight=msg.credibility_weight,
+            scraped_at=msg.scraped_at,
+            post_id=msg.post_id,
+        )))
+    evidence.sort(key=lambda x: x[0], reverse=True)
+    supporting_sources = [e for _, e in evidence]
+
     # --- Window timestamps ---
     scraped_times = [msg.scraped_at for msg in messages]
     window_start = min(scraped_times)
@@ -201,4 +218,5 @@ def aggregate_signals(messages: list[SentimentScored]) -> FinalSignal:
         score_distribution=score_distribution,
         forced_hold=forced_hold,
         forced_hold_reason=forced_hold_reason,
+        supporting_sources=supporting_sources,
     )

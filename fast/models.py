@@ -29,6 +29,19 @@ class SentimentScored(Model):
     post_id: str = ""
 
 
+class SourceEvidence(Model):
+    """A single source that contributed to the signal — shown to the user as supporting evidence."""
+    source_name: str                    # "reuters", "reddit", etc.
+    source_category: str                # "financial_media", "analyst", "social", "macro"
+    text: str                           # original article/post text (or snippet)
+    sentiment_score: float              # individual FinBERT score, -1.0 to +1.0
+    sentiment_direction: str            # "positive", "negative", "neutral"
+    confidence: float                   # FinBERT confidence, 0.0 to 1.0
+    credibility_weight: float           # source credibility, 0.50-0.95
+    scraped_at: str
+    post_id: str = ""
+
+
 class FinalSignal(Model):
     """Output of the Signal Engine — sent to dashboard and written to DB."""
     ticker: str
@@ -46,3 +59,4 @@ class FinalSignal(Model):
     score_distribution: dict            # {"positive": N, "negative": N, "neutral": N}
     forced_hold: bool
     forced_hold_reason: str | None = None
+    supporting_sources: list[SourceEvidence] = []  # individual sources for user transparency
