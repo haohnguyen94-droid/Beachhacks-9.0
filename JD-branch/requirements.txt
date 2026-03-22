@@ -1,0 +1,3 @@
+uagents
+python-dotenv
+httpx
