@@ -1,42 +1,50 @@
 from __future__ import annotations
 
 import os
-from dotenv import load_dotenv, find_dotenv
 
 from uagents import Agent, Context
 
-from models.models import ScraperOutput
-from data_fetchers.newsdata_fetcher import fetch_all_news
+from data_fetchers.newsdata_fetcher import fetch_news_for_ticker
+from models.models import ScrapeBatch, ScrapeRequest, ScraperOutput
 
-load_dotenv(find_dotenv())
+ORCHESTRATOR_ADDRESS = os.getenv("ORCHESTRATOR_ADDRESS", "")
 
 agent = Agent(
     name="newsdata_scraper_agent",
-    seed=os.getenv("NEWSDATA_AGENT_SEED_PHRASE"),
+    seed=os.getenv("NEWSDATA_AGENT_SEED_PHRASE", "newsdata_scraper_seed"),
     port=8001,
     endpoint=["http://localhost:8001/submit"],
+    mailbox=False,
 )
 
 
-@agent.on_interval(period=60.0)
-async def run_news_scraper(ctx: Context):
-    """
-    Periodically fetch market-moving news articles and emit ScraperOutput messages.
-    """
+@agent.on_message(model=ScrapeRequest)
+async def handle_scrape_request(ctx: Context, sender: str, msg: ScrapeRequest) -> None:
+    """Fetch NewsData items for requested tickers and return a batch to the orchestrator."""
 
-    ctx.logger.info("Running NewsData scraper agent...")
+    ctx.logger.info(
+        f"Received scrape request: request_id={msg.request_id}, tickers={msg.tickers}, limit={msg.limit}"
+    )
 
-    try:
-        results = await fetch_all_news()
+    all_items: list[ScraperOutput] = []
 
-        for item in results:
-            msg = ScraperOutput(**item)
-            ctx.logger.info(f"[News] {msg.ticker} -> {msg.title}")
+    for ticker in msg.tickers:
+        raw_items = await fetch_news_for_ticker(ticker=ticker, limit=msg.limit)
+        ctx.logger.info(f"NewsData fetched {len(raw_items)} items for {ticker}")
 
-        ctx.logger.info(f"Broadcasted {len(results)} news items")
+        for item in raw_items:
+            all_items.append(ScraperOutput(**item))
 
-    except Exception as e:
-        ctx.logger.error(f"NewsData fetch failed: {e}")
+    batch = ScrapeBatch(
+        request_id=msg.request_id,
+        source_agent="newsdata_scraper_agent",
+        items=all_items,
+    )
+
+    target = sender or ORCHESTRATOR_ADDRESS
+    ctx.logger.info(f"Sending {len(all_items)} items back to orchestrator")
+    await ctx.send(target, batch)
+    ctx.logger.info(f"Returned {len(all_items)} NewsData items to orchestrator")
 
 
 if __name__ == "__main__":
