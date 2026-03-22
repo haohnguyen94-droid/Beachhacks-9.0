@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 
@@ -51,11 +52,8 @@ async def load_models(ctx: Context) -> None:
 
 # FinBERT Model Scoring
 
-async def score_with_finbert(text: str) -> dict[str, float]:
-    """Run text through FinBERT and return score + confidence."""
-    if finbert_model is None or finbert_tokenizer is None:
-        raise RuntimeError("FinBERT model is not loaded.")
-
+def _run_finbert(text: str) -> dict[str, float]:
+    """Synchronous FinBERT inference — runs in a thread to avoid blocking."""
     inputs = finbert_tokenizer(
         text,
         return_tensors="pt",
@@ -77,6 +75,14 @@ async def score_with_finbert(text: str) -> dict[str, float]:
     confidence = max(positive_prob, negative_prob, neutral_prob)
 
     return {"score": score, "confidence": confidence}
+
+
+async def score_with_finbert(text: str) -> dict[str, float]:
+    """Run text through FinBERT in a thread so the event loop stays free."""
+    if finbert_model is None or finbert_tokenizer is None:
+        raise RuntimeError("FinBERT model is not loaded.")
+
+    return await asyncio.get_event_loop().run_in_executor(None, _run_finbert, text)
 
 
 # Helper functions
