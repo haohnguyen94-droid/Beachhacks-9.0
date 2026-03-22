@@ -14,7 +14,7 @@ from uagents import Agent, Context
 load_dotenv()
 
 from aggregator import aggregate_signals
-from models import FinalSignal, SentimentScored
+from models import AggregateRequest, FinalSignal, SentimentScored
 
 # Agent initialization
 
@@ -176,6 +176,49 @@ async def handle_sentiment_scored(ctx: Context, sender: str, msg: SentimentScore
         )
     except Exception as exc:
         ctx.logger.error(f"Error buffering message for {msg.ticker}: {exc}")
+
+
+# On-demand aggregation — triggered by the orchestrator after scrapers finish
+
+@agent.on_message(model=AggregateRequest)
+async def handle_aggregate_request(ctx: Context, sender: str, msg: AggregateRequest) -> None:
+    """Aggregate buffered scores for a ticker immediately and send FinalSignal back."""
+    ticker = msg.ticker
+    ctx.logger.info(f"Received AggregateRequest for {ticker} from {sender}")
+
+    # Wait briefly for any in-flight sentiment scores to arrive
+    await asyncio.sleep(5)
+
+    lock = _get_lock(ticker)
+    async with lock:
+        messages = message_buffer.pop(ticker, [])
+        seen_post_ids.pop(ticker, None)
+
+    if not messages:
+        ctx.logger.warning(f"No buffered messages for {ticker} — cannot aggregate.")
+        return
+
+    signal = aggregate_signals(messages)
+
+    ctx.logger.info(
+        f"On-demand signal {signal.ticker}: direction={signal.direction}, "
+        f"score={signal.aggregate_score}, confidence={signal.confidence_pct}%, "
+        f"sources={signal.source_count}"
+    )
+
+    # Send FinalSignal back to the requester (orchestrator)
+    await ctx.send(msg.requester_address, signal)
+    ctx.logger.info(f"Sent FinalSignal for {ticker} back to orchestrator.")
+
+    # Also write to dashboard and DB
+    try:
+        await send_to_dashboard(signal)
+    except Exception as exc:
+        ctx.logger.error(f"Dashboard POST failed for {ticker}: {exc}")
+    try:
+        await write_to_db(signal)
+    except Exception as exc:
+        ctx.logger.error(f"DB write failed for {ticker}: {exc}")
 
 
 # Interval handler — aggregate and emit signals
