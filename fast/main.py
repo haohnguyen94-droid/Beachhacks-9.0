@@ -21,6 +21,19 @@ app.add_middleware(
 signals: list[dict[str, Any]] = []
 
 
+# Pydantic model for individual source evidence
+class SourceEvidencePayload(BaseModel):
+    source_name: str
+    source_category: str
+    text: str
+    sentiment_score: float
+    sentiment_direction: str
+    confidence: float
+    credibility_weight: float
+    scraped_at: str
+    post_id: str = ""
+
+
 # Pydantic model for receiving signals via POST
 class SignalPayload(BaseModel):
     ticker: str
@@ -38,6 +51,7 @@ class SignalPayload(BaseModel):
     score_distribution: dict
     forced_hold: bool
     forced_hold_reason: str | None = None
+    supporting_sources: list[SourceEvidencePayload] = []
 
 
 @app.get("/")
