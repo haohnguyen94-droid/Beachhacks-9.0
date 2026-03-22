@@ -1,25 +1,12 @@
-# sentiment_agent.py — Stage 5: FinBERT Sentiment Scoring Agent
-#
-# Three-tier scoring logic:
-#   Tier 1 — Every incoming article is scored by FinBERT (ProsusAI/finbert).
-#            The model outputs positive/negative/neutral probabilities, which
-#            are converted to a scalar score: score = P(pos) - P(neg).
-#   Tier 2 — If FinBERT's confidence (max of the three probabilities) falls
-#            below 0.70, a secondary call to Claude (Anthropic LLM) re-scores
-#            the text. The higher-confidence result wins.
-#   Tier 3 — When the final confidence exceeds 0.85, a follow-up LLM call
-#            generates a plain-English explanation ("ai_reasoning") for the
-#            dashboard's Evidence Drill-Down panel.
+# Using ProsusAI's FinBERT agent, return a score based on sentiment 
+# Returns a confidence score and probabilities of an article being 
+# positive/negative/neutral
 
 from __future__ import annotations
 
-import json
-import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
 
-import anthropic
 import torch
 from dotenv import load_dotenv
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -29,17 +16,12 @@ load_dotenv()
 
 from models import EntityExtracted, SentimentScored
 
-# ---------------------------------------------------------------------------
-# Module-level model references (populated on startup)
-# ---------------------------------------------------------------------------
+# Model references
 
 finbert_model: AutoModelForSequenceClassification | None = None
 finbert_tokenizer: AutoTokenizer | None = None
-anthropic_client: anthropic.Anthropic | None = None
 
-# ---------------------------------------------------------------------------
-# Agent definition
-# ---------------------------------------------------------------------------
+# Agent initialization
 
 SIGNAL_ENGINE_ADDRESS: str = os.getenv("SIGNAL_ENGINE_ADDRESS", "")
 SENTIMENT_AGENT_PORT: int = int(os.getenv("SENTIMENT_AGENT_PORT", "8002"))
@@ -54,7 +36,7 @@ agent = Agent(
 
 @agent.on_event("startup")
 async def load_models(ctx: Context) -> None:
-    global finbert_model, finbert_tokenizer, anthropic_client
+    global finbert_model, finbert_tokenizer
 
     ctx.logger.info(f"Sentiment agent address: {agent.address}")
     ctx.logger.info("Loading ProsusAI/finbert model and tokenizer...")
@@ -66,17 +48,8 @@ async def load_models(ctx: Context) -> None:
     except Exception as exc:
         ctx.logger.error(f"Failed to load FinBERT: {exc}")
 
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if api_key:
-        anthropic_client = anthropic.Anthropic(api_key=api_key)
-        ctx.logger.info("Anthropic client initialised.")
-    else:
-        ctx.logger.warning("ANTHROPIC_API_KEY not set — Tier 2/3 LLM calls will be skipped.")
 
-
-# ---------------------------------------------------------------------------
-# Tier 1 — FinBERT scoring
-# ---------------------------------------------------------------------------
+# FinBERT Model Scoring 
 
 async def score_with_finbert(context_window: str) -> dict[str, float]:
     """Run *context_window* through FinBERT and return score + confidence."""
@@ -106,96 +79,18 @@ async def score_with_finbert(context_window: str) -> dict[str, float]:
     return {"score": score, "confidence": confidence}
 
 
-# ---------------------------------------------------------------------------
-# Tier 2 — LLM re-scoring (low-confidence fallback)
-# ---------------------------------------------------------------------------
+# Helper functions
 
-async def score_with_llm(
-    context_window: str,
-    sentiment_words: list[str],
-    keywords: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Ask Claude for a structured sentiment score.  Returns parsed dict or None on failure."""
-    if anthropic_client is None:
-        return None
-
-    prompt = (
-        "You are a financial-sentiment analyst. Analyse the excerpt below and "
-        "return ONLY a JSON object with these fields:\n"
-        '  score (float, -1.0 to 1.0),\n'
-        '  direction ("positive", "negative", or "neutral"),\n'
-        '  confidence (float, 0.0 to 1.0),\n'
-        '  reason (string, one sentence max).\n\n'
-        "No markdown, no explanation — just the JSON object.\n\n"
-        f"Excerpt:\n{context_window}\n\n"
-        f"Sentiment words: {sentiment_words}\n"
-        f"Keywords: {json.dumps(keywords)}\n"
-    )
-
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw_text: str = response.content[0].text.strip()
-        parsed: dict[str, Any] = json.loads(raw_text)
-
-        # Validate required fields
-        for field in ("score", "direction", "confidence", "reason"):
-            if field not in parsed:
-                return None
-        return parsed
-    except (json.JSONDecodeError, anthropic.APIError, Exception):
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Tier 3 — Evidence enrichment
-# ---------------------------------------------------------------------------
-
-async def enrich_with_reasoning(
-    ticker: str,
-    context_window: str,
-    direction: str,
-) -> str | None:
-    """Generate a 2-3 sentence plain-English explanation for the dashboard."""
-    if anthropic_client is None:
-        return None
-
-    prompt = (
-        f"In 2-3 sentences, explain why the stock ticker {ticker} is being "
-        f"discussed {'negatively' if direction == 'negative' else 'positively'} "
-        f"based on the following excerpt. Be specific and cite details from the text.\n\n"
-        f"Excerpt:\n{context_window}"
-    )
-
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text.strip()
-    except Exception:
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
+# Probability from score 
 def _direction_from_score(score: float) -> str:
-    if score > 0.05:
+    if score > 0.1:
         return "positive"
-    if score < -0.05:
+    if score < -0.1:
         return "negative"
     return "neutral"
 
 
-# ---------------------------------------------------------------------------
 # Message handler
-# ---------------------------------------------------------------------------
 
 @agent.on_message(model=EntityExtracted)
 async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracted) -> None:
@@ -208,7 +103,7 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
             )
             return
 
-        # --- Tier 1: FinBERT ---
+        # FinBERT scoring 
         try:
             fb = await score_with_finbert(msg.context_window)
         except Exception as exc:
@@ -217,60 +112,21 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
 
         finbert_score: float = fb["score"]
         finbert_confidence: float = fb["confidence"]
-
-        final_score = finbert_score
-        final_confidence = finbert_confidence
-        scoring_tier = 1
-        llm_score: float | None = None
-        llm_confidence: float | None = None
-
-        # --- Tier 2: LLM re-scoring if FinBERT confidence < 0.70 ---
-        if finbert_confidence < 0.70:
-            llm_result = await score_with_llm(
-                msg.context_window,
-                msg.sentiment_words,
-                msg.keywords,
-            )
-            if llm_result is not None:
-                llm_score = float(llm_result["score"])
-                llm_confidence = float(llm_result["confidence"])
-                if llm_confidence > finbert_confidence:
-                    final_score = llm_score
-                    final_confidence = llm_confidence
-                    scoring_tier = 2
-                    ctx.logger.info(
-                        f"{msg.ticker}: LLM re-score used (FinBERT conf={finbert_confidence:.2f}, "
-                        f"LLM conf={llm_confidence:.2f})."
-                    )
-            else:
-                ctx.logger.warning(
-                    f"{msg.ticker}: LLM re-score failed — falling back to FinBERT."
-                )
-
-        direction = _direction_from_score(final_score)
-
-        # --- Tier 3: Evidence enrichment if final confidence > 0.85 ---
-        ai_reasoning: str | None = None
-        if final_confidence > 0.85 and direction != "neutral":
-            ai_reasoning = await enrich_with_reasoning(
-                msg.ticker, msg.context_window, direction,
-            )
-            if ai_reasoning:
-                scoring_tier = 3
-
+        direction = _direction_from_score(finbert_score)
         scored_at = datetime.now(timezone.utc).isoformat()
 
+        # FinBERT's Sentiment Score
         result = SentimentScored(
             ticker=msg.ticker,
             finbert_score=round(finbert_score, 4),
             finbert_confidence=round(finbert_confidence, 4),
-            llm_score=round(llm_score, 4) if llm_score is not None else None,
-            llm_confidence=round(llm_confidence, 4) if llm_confidence is not None else None,
-            final_score=round(final_score, 4),
-            final_confidence=round(final_confidence, 4),
+            llm_score=None,
+            llm_confidence=None,
+            final_score=round(finbert_score, 4),
+            final_confidence=round(finbert_confidence, 4),
             direction=direction,
-            scoring_tier=scoring_tier,
-            ai_reasoning=ai_reasoning,
+            scoring_tier=1,
+            ai_reasoning=None,
             source_name=msg.source_name,
             credibility_weight=msg.credibility_weight,
             ticker_context=msg.context_window,
@@ -280,13 +136,14 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
         )
 
         ctx.logger.info(
-            f"Scored {msg.ticker}: final_score={result.final_score}, "
-            f"direction={result.direction}, confidence={result.final_confidence:.2f}, "
-            f"tier={result.scoring_tier}"
+            f"Scored {msg.ticker}: score={result.final_score}, "
+            f"direction={result.direction}, confidence={result.final_confidence:.2f}"
         )
 
+        # Send the result to the signal engine
         if SIGNAL_ENGINE_ADDRESS:
             await ctx.send(SIGNAL_ENGINE_ADDRESS, result)
+
         else:
             ctx.logger.warning("SIGNAL_ENGINE_ADDRESS not set — scored message not forwarded.")
 
@@ -294,9 +151,6 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
         ctx.logger.error(f"Unhandled error processing {msg.ticker}: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
+# Run program
 if __name__ == "__main__":
     agent.run()
