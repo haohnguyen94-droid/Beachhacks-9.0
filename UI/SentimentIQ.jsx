@@ -290,12 +290,22 @@ function DetailModal({ detail, signal, onClose }) {
     { label: "NEGATIVE", pct: Math.round(((dist.negative || 0) / totalDist) * 100), color: "#ef4444" },
   ];
 
-  // Build supporting signals from the signal's sources array
-  const supportingSignals = (signal?.sources || []).slice(0, 5).map((s) => ({
-    source: (s.source_name || "newsdata").toUpperCase(),
-    label: (s.direction || "neutral").toUpperCase(),
-    text: s.title || s.text?.slice(0, 120) || "",
-  }));
+  // Build supporting signals from the signal's sources array, deduplicating by source_name
+  const uniqueSources = [];
+  const seenSources = new Set();
+  for (const s of signal?.sources || []) {
+    const sourceName = (s.source_name || "newsdata").toUpperCase();
+    if (!seenSources.has(sourceName)) {
+      seenSources.add(sourceName);
+      uniqueSources.push({
+        source: sourceName,
+        label: (s.direction || "neutral").toUpperCase(),
+        text: s.title || s.text?.slice(0, 120) || "",
+      });
+      if (uniqueSources.length >= 3) break;
+    }
+  }
+  const supportingSignals = uniqueSources;
 
   const signalLabel = confidence >= 80 ? `STRONG ${direction}` : direction;
 
@@ -693,10 +703,69 @@ function LoadingOverlay({ message }) {
 }
 
 // ─── WATCHLIST VIEW ───────────────────────────────────────────────
-function WatchlistView({ signals, onSelectTicker }) {
+function WatchlistView({ onSelectTicker }) {
   const [sortBy, setSortBy] = useState("score");
+  const [tickerInput, setTickerInput] = useState("");
+  const [watchlistSignals, setWatchlistSignals] = useState([]);
+  const [adding, setAdding] = useState(false);
+  const [inputError, setInputError] = useState("");
 
-  const sorted = [...signals].sort((a, b) => {
+  // Load watchlist on mount
+  useEffect(() => {
+    fetch(`${API_BASE}/api/watchlist`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.watchlist) setWatchlistSignals(d.watchlist);
+      })
+      .catch(() => {});
+  }, []);
+
+  const addTicker = async () => {
+    const ticker = tickerInput.trim().toUpperCase();
+    if (!ticker) return;
+
+    // Client-side duplicate check
+    if (watchlistSignals.some((s) => s.ticker === ticker)) {
+      setInputError(`${ticker} is already in your watchlist.`);
+      return;
+    }
+
+    setAdding(true);
+    setInputError("");
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/watchlist/add`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker }),
+      });
+      const result = await resp.json();
+
+      if (result.error) {
+        setInputError(result.error);
+      } else if (result.signal) {
+        setWatchlistSignals((prev) => [...prev, result.signal]);
+        setTickerInput("");
+      }
+    } catch {
+      setInputError("Failed to connect to API.");
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const removeTicker = async (ticker) => {
+    try {
+      await fetch(`${API_BASE}/api/watchlist/${ticker}`, { method: "DELETE" });
+      setWatchlistSignals((prev) => prev.filter((s) => s.ticker !== ticker));
+    } catch {}
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === "Enter") addTicker();
+  };
+
+  const sorted = [...watchlistSignals].sort((a, b) => {
     if (sortBy === "score") return Math.abs(b.aggregate_score) - Math.abs(a.aggregate_score);
     if (sortBy === "confidence") return b.confidence_pct - a.confidence_pct;
     return a.ticker.localeCompare(b.ticker);
@@ -707,7 +776,7 @@ function WatchlistView({ signals, onSelectTicker }) {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h2 className="text-xl font-sans font-bold text-[#e8f0f8] mb-1">Watchlist</h2>
-          <p className="text-xs font-sans text-[#5a7088]">{signals.length} tickers tracked</p>
+          <p className="text-xs font-sans text-[#5a7088]">{watchlistSignals.length} tickers tracked</p>
         </div>
         <div className="flex gap-2">
           {["score", "confidence", "ticker"].map((s) => (
@@ -726,9 +795,42 @@ function WatchlistView({ signals, onSelectTicker }) {
         </div>
       </div>
 
-      {signals.length === 0 ? (
+      {/* Add ticker input */}
+      <div className="bg-[#111c2a] border border-[#1a2838] rounded-xl p-5 mb-5">
+        <div className="text-[10px] font-mono text-[#5a7088] tracking-widest mb-3">ADD TICKER TO WATCHLIST</div>
+        <div className="flex gap-3">
+          <input
+            type="text"
+            value={tickerInput}
+            onChange={(e) => { setTickerInput(e.target.value.toUpperCase()); setInputError(""); }}
+            onKeyDown={handleKeyDown}
+            placeholder="e.g. AAPL, TSLA, NVDA..."
+            disabled={adding}
+            className="flex-1 bg-[#0b1019] border border-[#1a2838] rounded-lg px-4 py-2.5 text-sm font-mono text-[#e8f0f8] placeholder-[#3d5268] focus:outline-none focus:border-[#00c896] transition-colors"
+          />
+          <button
+            onClick={addTicker}
+            disabled={adding || !tickerInput.trim()}
+            className={`px-6 py-2.5 rounded-lg text-xs font-mono font-bold tracking-wider transition-colors ${
+              adding
+                ? "bg-[#1a2535] text-[#5a7088] cursor-wait"
+                : !tickerInput.trim()
+                ? "bg-[#1a2535] text-[#3d5268] cursor-not-allowed"
+                : "bg-[#00c896] text-[#0b1019] hover:bg-[#00b385]"
+            }`}
+          >
+            {adding ? "ANALYZING..." : "+ ADD"}
+          </button>
+        </div>
+        {inputError && (
+          <div className="mt-2 text-xs font-mono text-[#ef4444]">{inputError}</div>
+        )}
+      </div>
+
+      {watchlistSignals.length === 0 ? (
         <div className="bg-[#111c2a] border border-[#1a2838] border-dashed rounded-xl p-12 text-center">
-          <div className="text-[#3d5268] text-xs font-mono tracking-widest">RUN ANALYSIS TO POPULATE WATCHLIST</div>
+          <div className="text-[#3d5268] text-xs font-mono tracking-widest mb-2">YOUR WATCHLIST IS EMPTY</div>
+          <div className="text-[#5a7088] text-xs font-sans">Add a ticker above to analyze its sentiment and generate a signal.</div>
         </div>
       ) : (
         <div className="bg-[#111c2a] border border-[#1a2838] rounded-xl overflow-hidden">
@@ -742,23 +844,23 @@ function WatchlistView({ signals, onSelectTicker }) {
                 <th className="text-left px-5 py-3 font-normal">SCORE</th>
                 <th className="text-left px-5 py-3 font-normal">STRENGTH</th>
                 <th className="text-left px-5 py-3 font-normal">SOURCES</th>
+                <th className="text-left px-5 py-3 font-normal"></th>
               </tr>
             </thead>
             <tbody>
               {sorted.map((s) => (
                 <tr
                   key={s.ticker}
-                  onClick={() => onSelectTicker(s.ticker)}
                   className="border-t border-[#1a2838] cursor-pointer hover:bg-[#0f1d2e] transition-colors"
                 >
-                  <td className="px-5 py-3 text-xs font-mono text-[#00c896] font-bold">{s.ticker}</td>
-                  <td className="px-5 py-3 text-xs font-sans text-[#8899aa]">{s.company}</td>
-                  <td className="px-5 py-3">
+                  <td className="px-5 py-3 text-xs font-mono text-[#00c896] font-bold" onClick={() => onSelectTicker(s)}>{s.ticker}</td>
+                  <td className="px-5 py-3 text-xs font-sans text-[#8899aa]" onClick={() => onSelectTicker(s)}>{s.company}</td>
+                  <td className="px-5 py-3" onClick={() => onSelectTicker(s)}>
                     <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${signalBgClass(s.direction)} text-[#0b1019]`}>
                       {s.direction}
                     </span>
                   </td>
-                  <td className="px-5 py-3">
+                  <td className="px-5 py-3" onClick={() => onSelectTicker(s)}>
                     <div className="flex items-center gap-2">
                       <div className="w-16 bg-[#1a2838] rounded-full h-1.5">
                         <div
@@ -769,11 +871,20 @@ function WatchlistView({ signals, onSelectTicker }) {
                       <span className="text-xs font-mono text-[#8899aa]">{s.confidence_pct}%</span>
                     </div>
                   </td>
-                  <td className="px-5 py-3 text-xs font-mono" style={{ color: signalColor(s.direction) }}>
+                  <td className="px-5 py-3 text-xs font-mono" style={{ color: signalColor(s.direction) }} onClick={() => onSelectTicker(s)}>
                     {s.aggregate_score > 0 ? "+" : ""}{s.aggregate_score.toFixed(4)}
                   </td>
-                  <td className="px-5 py-3 text-xs font-mono text-[#8899aa]">{s.signal_strength}</td>
-                  <td className="px-5 py-3 text-xs font-mono text-[#8899aa]">{s.source_count}</td>
+                  <td className="px-5 py-3 text-xs font-mono text-[#8899aa]" onClick={() => onSelectTicker(s)}>{s.signal_strength}</td>
+                  <td className="px-5 py-3 text-xs font-mono text-[#8899aa]" onClick={() => onSelectTicker(s)}>{s.source_count}</td>
+                  <td className="px-5 py-3">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); removeTicker(s.ticker); }}
+                      className="text-[#3d5268] hover:text-[#ef4444] transition-colors text-xs font-mono"
+                      title="Remove from watchlist"
+                    >
+                      ✕
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -789,6 +900,7 @@ function DashboardView({ data, analyzing, onAnalyze }) {
   const [activeNav, setActiveNav] = useState("dashboard");
   const [selectedCard, setSelectedCard] = useState(null);
   const [showDetail, setShowDetail] = useState(false);
+  const [watchlistDetail, setWatchlistDetail] = useState(null);
   const [filter, setFilter] = useState("ALL");
   const [featuredOffset, setFeaturedOffset] = useState(0);
 
@@ -875,9 +987,8 @@ function DashboardView({ data, analyzing, onAnalyze }) {
         <div className="flex-1 overflow-y-auto p-6">
           {activeNav === "watchlist" ? (
             <WatchlistView
-              signals={signals}
-              onSelectTicker={(ticker) => {
-                setSelectedCard(ticker);
+              onSelectTicker={(signal) => {
+                setWatchlistDetail(signal);
                 setShowDetail(true);
               }}
             />
@@ -964,6 +1075,14 @@ function DashboardView({ data, analyzing, onAnalyze }) {
           detail={selectedFeatured}
           signal={selectedSignal}
           onClose={() => setShowDetail(false)}
+        />
+      )}
+
+      {showDetail && watchlistDetail && (
+        <DetailModal
+          detail={{ ticker: watchlistDetail.ticker, company: watchlistDetail.company }}
+          signal={watchlistDetail}
+          onClose={() => { setShowDetail(false); setWatchlistDetail(null); }}
         />
       )}
     </div>
