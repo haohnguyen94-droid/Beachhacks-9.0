@@ -1,5 +1,5 @@
-# Using ProsusAI's FinBERT agent, return a score based on sentiment 
-# Returns a confidence score and probabilities of an article being 
+# Using ProsusAI's FinBERT agent, return a score based on sentiment
+# Returns a confidence score and probabilities of an article being
 # positive/negative/neutral
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from uagents import Agent, Context
 
 load_dotenv()
 
-from models import EntityExtracted, SentimentScored
+from models import ScraperOutput, SentimentScored
 
 # Model references
 
@@ -49,15 +49,15 @@ async def load_models(ctx: Context) -> None:
         ctx.logger.error(f"Failed to load FinBERT: {exc}")
 
 
-# FinBERT Model Scoring 
+# FinBERT Model Scoring
 
-async def score_with_finbert(context_window: str) -> dict[str, float]:
-    """Run *context_window* through FinBERT and return score + confidence."""
+async def score_with_finbert(text: str) -> dict[str, float]:
+    """Run text through FinBERT and return score + confidence."""
     if finbert_model is None or finbert_tokenizer is None:
         raise RuntimeError("FinBERT model is not loaded.")
 
     inputs = finbert_tokenizer(
-        context_window,
+        text,
         return_tensors="pt",
         truncation=True,
         max_length=512,
@@ -81,7 +81,6 @@ async def score_with_finbert(context_window: str) -> dict[str, float]:
 
 # Helper functions
 
-# Probability from score 
 def _direction_from_score(score: float) -> str:
     if score > 0.1:
         return "positive"
@@ -92,20 +91,20 @@ def _direction_from_score(score: float) -> str:
 
 # Message handler
 
-@agent.on_message(model=EntityExtracted)
-async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracted) -> None:
+@agent.on_message(model=ScraperOutput)
+async def handle_scraper_output(ctx: Context, sender: str, msg: ScraperOutput) -> None:
     try:
-        # Guard: skip empty or trivially short context
-        if not msg.context_window or len(msg.context_window.strip()) < 10:
+        # Guard: skip empty or trivially short text
+        if not msg.text or len(msg.text.strip()) < 10:
             ctx.logger.warning(
-                f"Skipping {msg.ticker}: context_window is empty or too short "
-                f"({len(msg.context_window.strip()) if msg.context_window else 0} chars)."
+                f"Skipping {msg.ticker}: text is empty or too short "
+                f"({len(msg.text.strip()) if msg.text else 0} chars)."
             )
             return
 
-        # FinBERT scoring 
+        # FinBERT scoring
         try:
-            fb = await score_with_finbert(msg.context_window)
+            fb = await score_with_finbert(msg.text)
         except Exception as exc:
             ctx.logger.error(f"FinBERT error for {msg.ticker}: {exc} — skipping message.")
             return
@@ -120,19 +119,15 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
             ticker=msg.ticker,
             finbert_score=round(finbert_score, 4),
             finbert_confidence=round(finbert_confidence, 4),
-            llm_score=None,
-            llm_confidence=None,
             final_score=round(finbert_score, 4),
             final_confidence=round(finbert_confidence, 4),
             direction=direction,
-            scoring_tier=1,
-            ai_reasoning=None,
             source_name=msg.source_name,
             credibility_weight=msg.credibility_weight,
-            ticker_context=msg.context_window,
-            keywords=msg.keywords,
+            text=msg.text,
             scraped_at=msg.scraped_at,
             scored_at=scored_at,
+            post_id=msg.post_id,
         )
 
         ctx.logger.info(
@@ -143,7 +138,6 @@ async def handle_entity_extracted(ctx: Context, sender: str, msg: EntityExtracte
         # Send the result to the signal engine
         if SIGNAL_ENGINE_ADDRESS:
             await ctx.send(SIGNAL_ENGINE_ADDRESS, result)
-
         else:
             ctx.logger.warning("SIGNAL_ENGINE_ADDRESS not set — scored message not forwarded.")
 
