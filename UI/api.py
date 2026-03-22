@@ -137,9 +137,11 @@ async def fetch_articles(tickers: list[str], target: int = 50) -> list[dict]:
                 print(f"[api] fetch error for {ticker}: {exc}")
                 continue
 
-            articles = data.get("results", [])
+            articles = data.get("results") or []
             count = 0
             for item in articles:
+                if not isinstance(item, dict):
+                    continue
                 if count >= per_ticker or len(results) >= target:
                     break
                 title = item.get("title", "")
@@ -240,6 +242,27 @@ def aggregate_scored(scored: list[dict]) -> dict:
 
 # ─── Cached result ────────────────────────────────────────────────
 _cached_result: dict[str, Any] | None = None
+
+# ─── Watchlist (in-memory, no persistence) ────────────────────────
+_watchlist: dict[str, dict] = {}  # ticker -> signal dict
+
+# Known tickers for validation (extend as needed)
+VALID_TICKERS: set[str] = {
+    "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOG", "GOOGL",
+    "JPM", "GS", "BAC", "XOM", "CVX", "UNH", "JNJ", "PFE",
+    "NEE", "DUK", "NFLX", "DIS", "AMD", "INTC", "CRM", "ORCL",
+    "V", "MA", "PYPL", "SQ", "SHOP", "COIN", "HOOD", "SOFI",
+    "BA", "LMT", "CAT", "DE", "WMT", "COST", "TGT", "HD",
+    "KO", "PEP", "MCD", "SBUX", "NKE", "LULU",
+    "SPY", "QQQ", "IWM", "DIA", "ARKK",
+    "BRK.B", "BRK.A", "T", "VZ", "CMCSA",
+    "UBER", "LYFT", "ABNB", "SNAP", "PINS", "TWTR",
+    "F", "GM", "RIVN", "LCID", "NIO", "LI", "XPEV",
+    "PLTR", "SNOW", "DDOG", "NET", "ZS", "CRWD",
+    "MRNA", "BNTX", "ABBV", "LLY", "MRK", "BMY",
+    "WFC", "C", "MS", "SCHW", "AXP",
+    "AVGO", "QCOM", "TXN", "MU", "AMAT", "LRCX",
+}
 
 # ─── Endpoints ─────────────────────────────────────────────────────
 
@@ -433,3 +456,87 @@ async def get_results():
     if _cached_result is None:
         return {"error": "No analysis has been run yet. POST /api/analyze first."}
     return _cached_result
+
+
+# ─── Watchlist endpoints ──────────────────────────────────────────
+
+class WatchlistAddRequest(BaseModel):
+    ticker: str
+
+
+@app.get("/api/watchlist")
+async def get_watchlist():
+    """Return all watchlist signals."""
+    return {"watchlist": list(_watchlist.values())}
+
+
+@app.post("/api/watchlist/add")
+async def watchlist_add(req: WatchlistAddRequest):
+    """
+    Add a ticker to the watchlist.
+    Validates the ticker, prevents duplicates, fetches news,
+    scores with FinBERT, and returns the signal.
+    """
+    ticker = req.ticker.strip().upper()
+
+    if not ticker:
+        return {"error": "Ticker cannot be empty."}
+
+    if ticker not in VALID_TICKERS:
+        return {"error": f"'{ticker}' is not a recognized ticker symbol."}
+
+    if ticker in _watchlist:
+        return {"error": f"'{ticker}' is already in your watchlist.", "duplicate": True}
+
+    if finbert_model is None:
+        return {"error": "FinBERT not loaded yet — wait for startup to complete."}
+
+    # Fetch articles for this single ticker
+    articles = await fetch_articles([ticker], target=10)
+    if not articles:
+        return {"error": f"No news articles found for '{ticker}'. Try a different ticker."}
+
+    # Score with FinBERT
+    scored: list[dict] = []
+    for art in articles:
+        try:
+            result = await score_text_async(art["text"])
+            scored.append({**art, **result})
+        except Exception as exc:
+            print(f"[api] watchlist scoring error for {ticker}: {exc}")
+
+    if not scored:
+        return {"error": f"Failed to score articles for '{ticker}'."}
+
+    # Aggregate into a signal
+    sig = aggregate_scored(scored)
+    if not sig:
+        return {"error": f"Could not generate signal for '{ticker}'."}
+
+    # Attach sources for detail view
+    sig["sources"] = [
+        {
+            "source_name": a["source_name"],
+            "title": a["title"],
+            "text": a["text"][:200],
+            "url": a["url"],
+            "score": round(a["score"], 4),
+            "confidence": round(a["confidence"], 4),
+            "direction": a["direction"],
+            "published_at": a["published_at"],
+        }
+        for a in scored
+    ]
+
+    _watchlist[ticker] = sig
+    return {"signal": sig}
+
+
+@app.delete("/api/watchlist/{ticker}")
+async def watchlist_remove(ticker: str):
+    """Remove a ticker from the watchlist."""
+    ticker = ticker.strip().upper()
+    if ticker in _watchlist:
+        del _watchlist[ticker]
+        return {"removed": ticker}
+    return {"error": f"'{ticker}' is not in your watchlist."}
