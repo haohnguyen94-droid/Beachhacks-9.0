@@ -1,6 +1,6 @@
 transformers==4.46.3
-torch==2.5.1
-uagents==0.17.1
+torch==2.6.0
+uagents==0.24.0
 pydantic==2.8.2
 python-dotenv==1.0.1
 asyncpg==0.30.0
