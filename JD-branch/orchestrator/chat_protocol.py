@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from uagents import Context, Protocol
-from models.config import NEWSDATA_ADDRESS, FINNHUB_ADDRESS, SIGNAL_ENGINE_ADDRESS, ORCHESTRATOR_SEED
+from models.config import NEWSDATA_ADDRESS, SIGNAL_ENGINE_ADDRESS, ORCHESTRATOR_SEED
 from uagents_core.identity import Identity
 from models.models import SharedAgentState, AggregateRequest
 from services.state_service import state_service
@@ -38,7 +38,6 @@ def _extract_ticker(text: str) -> str | None:
 
 SCRAPER_AGENTS = [
     ("newsdata_scraper", NEWSDATA_ADDRESS),
-    ("finnhub_scraper", FINNHUB_ADDRESS),
 ]
 
 
