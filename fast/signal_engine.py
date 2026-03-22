@@ -18,7 +18,7 @@ from models import AggregateRequest, FinalSignal, SentimentScored
 
 # Agent initialization
 
-DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8000")
+DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8080")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 SIGNAL_ENGINE_PORT: int = int(os.getenv("SIGNAL_ENGINE_PORT", "8003"))
 AGGREGATION_INTERVAL: float = float(os.getenv("AGGREGATION_INTERVAL", "900.0"))

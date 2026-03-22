@@ -5,13 +5,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import threading
 from datetime import datetime, timezone
+from typing import Any
 
 import torch
 from dotenv import load_dotenv
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from uagents import Agent, Context
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
 load_dotenv()
 
@@ -155,6 +161,115 @@ async def handle_scraper_output(ctx: Context, sender: str, msg: ScraperOutput) -
         ctx.logger.error(f"Unhandled error processing {msg.ticker}: {exc}")
 
 
+# ─── Helper function for scoring (non-blocking) ────────────────────
+
+def _run_finbert(text: str) -> dict[str, float]:
+    """Synchronous FinBERT inference."""
+    if finbert_model is None or finbert_tokenizer is None:
+        raise RuntimeError("FinBERT not loaded")
+
+    inputs = finbert_tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=True,
+        max_length=512,
+        padding=True,
+    )
+    with torch.no_grad():
+        outputs = finbert_model(**inputs)
+        probabilities = torch.nn.functional.softmax(outputs.logits, dim=-1)[0]
+
+    positive_prob: float = probabilities[0].item()
+    negative_prob: float = probabilities[1].item()
+    neutral_prob: float = probabilities[2].item()
+
+    score = positive_prob - negative_prob
+    confidence = max(positive_prob, negative_prob, neutral_prob)
+
+    return {"score": score, "confidence": confidence}
+
+
+# ─── FastAPI HTTP interface ───────────────────────────────────────
+
+http_app = FastAPI(title="Sentiment Agent HTTP")
+
+http_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@http_app.post("/score")
+async def http_score(payload: dict[str, Any]) -> dict[str, Any]:
+    """HTTP endpoint to score articles (bypasses uagents message protocol)."""
+    try:
+        ticker = payload.get("ticker", "")
+        text = payload.get("text", "")
+
+        if not text or len(text.strip()) < 10:
+            return {"error": "Text too short"}
+
+        if finbert_model is None:
+            return {"error": "FinBERT not loaded"}
+
+        # Score in executor to avoid blocking
+        fb = await asyncio.get_event_loop().run_in_executor(None, _run_finbert, text)
+
+        finbert_score = fb["score"]
+        finbert_confidence = fb["confidence"]
+        direction = _direction_from_score(finbert_score)
+        scored_at = datetime.now(timezone.utc).isoformat()
+
+        result = {
+            "ticker": ticker,
+            "finbert_score": round(finbert_score, 4),
+            "finbert_confidence": round(finbert_confidence, 4),
+            "final_score": round(finbert_score, 4),
+            "final_confidence": round(finbert_confidence, 4),
+            "direction": direction,
+            "source_name": payload.get("source_name", ""),
+            "credibility_weight": payload.get("credibility_weight", 0.8),
+            "text": text,
+            "url": payload.get("url", ""),
+            "title": payload.get("title", ""),
+            "scraped_at": payload.get("scraped_at", datetime.now(timezone.utc).isoformat()),
+            "scored_at": scored_at,
+            "post_id": payload.get("post_id", ""),
+        }
+
+        # Also send to signal_engine if we have the address
+        if SIGNAL_ENGINE_ADDRESS:
+            try:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        f"http://localhost:8003/submit",
+                        json=result,
+                        timeout=5,
+                    )
+            except Exception as e:
+                print(f"[sentiment_agent] Could not send to signal_engine: {e}")
+
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+@http_app.get("/health")
+async def health():
+    return {"ok": True}
+
+def run_http_server():
+    """Run FastAPI server on port 8001."""
+    uvicorn.run(http_app, host="0.0.0.0", port=8001, log_level="error")
+
+
 # Run program
 if __name__ == "__main__":
+    # Start HTTP server in background thread
+    http_thread = threading.Thread(target=run_http_server, daemon=True)
+    http_thread.start()
+
+    # Run agent
     agent.run()

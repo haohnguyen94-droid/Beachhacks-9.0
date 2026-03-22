@@ -1,0 +1,127 @@
+═══════════════════════════════════════════════════════════════════════════════
+SENTIMENTIQ AGENT WORKFLOW - QUICK START
+═══════════════════════════════════════════════════════════════════════════════
+
+STEP 1: OPEN 6 TERMINALS AND COPY-PASTE THESE COMMANDS
+
+Terminal 1 - Orchestrator Agent:
+python fast/orchestrator_agent.py
+
+Terminal 2 - News Scraper Agent:
+cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0 && export PYTHONPATH=/Users/brybry.o_o/beachhacks/Beachhacks-9.0/fast:$PYTHONPATH && python scrappers/news_agent/news_agent_integrated.py
+
+Terminal 3 - Sentiment Agent:
+cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0/fast && python sentiment_agent.py
+
+Terminal 4 - Signal Engine:
+cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0/fast && python signal_engine.py
+
+Terminal 5 - FastAPI Backend (NEW VERSION):
+cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0 && uvicorn UI.api_agents:app --reload --port 8080
+
+Terminal 6 - React Frontend:
+cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0/UI && npm run dev
+
+───────────────────────────────────────────────────────────────────────────────
+
+STEP 2: WAIT FOR ALL AGENTS TO START (30-60 seconds)
+
+Each agent will print something like:
+  INFO: Agent address: agent1qf0s8fkfkwu9dgnqrzhenysex6f0khvnpp5vr09acwzw4t9e7yjq...
+
+───────────────────────────────────────────────────────────────────────────────
+
+STEP 3: COPY AGENT ADDRESSES INTO .env
+
+From the agent startup logs, copy:
+  - Orchestrator address → ORCHESTRATOR_ADDRESS=
+  - News Scraper address → SENTIMENT_AGENT_ADDRESS= (note: news scraper sends to sentiment)
+  - Sentiment Agent address → SIGNAL_ENGINE_ADDRESS= (sentiment sends to signal engine)
+  - Signal Engine address → DASHBOARD_URL= (signal engine sends to dashboard)
+
+Example .env:
+ORCHESTRATOR_ADDRESS=agent1qf0s8fkfkwu9dgnqrzhenysex6f0khvnpp5vr09acwzw4t9e7yjq...
+SENTIMENT_AGENT_ADDRESS=agent1qwmltvjxte04e380qjuv3mdhkgdlgpc6ddw8vmf3eqfpzp5gjkzh...
+SIGNAL_ENGINE_ADDRESS=agent1qXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
+DASHBOARD_URL=http://localhost:8080
+
+───────────────────────────────────────────────────────────────────────────────
+
+STEP 4: RESTART SENTIMENT AGENT AND SIGNAL ENGINE
+
+In Terminal 3 & 4, press Ctrl+C and run the commands again:
+
+Terminal 3: cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0/fast && python sentiment_agent.py
+Terminal 4: cd /Users/brybry.o_o/beachhacks/Beachhacks-9.0/fast && python signal_engine.py
+
+This lets them discover each other's addresses.
+
+───────────────────────────────────────────────────────────────────────────────
+
+STEP 5: OPEN BROWSER AND TEST
+
+1. Open: http://localhost:5173
+2. Click DASHBOARD tab
+3. Click "+ NEW SIGNAL" button
+4. Watch the agents work:
+   - Orchestrator sends queries
+   - News scraper fetches articles (2-5 seconds)
+   - Sentiment agent scores them (15-30 seconds)
+   - Signal engine aggregates (< 1 second)
+5. Signals appear on dashboard!
+
+───────────────────────────────────────────────────────────────────────────────
+
+AGENT WORKFLOW
+
+Frontend (5173) 
+   ↓ HTTP POST /api/analyze
+FastAPI (8080)
+   ↓ uagents message
+Orchestrator (8005)
+   ↓ uagents message
+News Scraper (8004)
+   ↓ ScraperOutput messages (real articles from NewsData.io)
+Sentiment Agent (8002)
+   ↓ SentimentScored messages (FinBERT scores)
+Signal Engine (8003)
+   ↓ FinalSignal HTTP POST
+FastAPI (8080) /api/signals
+   → Dashboard display
+
+───────────────────────────────────────────────────────────────────────────────
+
+TROUBLESHOOTING
+
+❌ "Agents can't communicate"
+✅ Copy their printed addresses to .env, restart them
+
+❌ "FinBERT takes 60+ seconds"
+✅ Normal on first run, then cached
+
+❌ "No signals appearing"
+✅ Make sure all 6 services are running, check logs for errors
+
+❌ "NewsData API rate limited"
+✅ System auto-rotates to next API key (you have 3 keys in .env)
+
+───────────────────────────────────────────────────────────────────────────────
+
+QUICK TIPS
+
+• Each agent needs its own terminal
+• Agent addresses are printed at startup - copy them to .env
+• Signal Engine must know FastAPI address (DASHBOARD_URL in .env)
+• First FinBERT load takes 60s, then cached
+• Check Terminal 5 (FastAPI) logs to see signals arriving
+
+───────────────────────────────────────────────────────────────────────────────
+
+SWITCHING BACK TO SIMPLE VERSION
+
+If you want the original non-agent version:
+  uvicorn UI.api:app --reload --port 8080
+
+Both work with the same frontend!
+
+═══════════════════════════════════════════════════════════════════════════════

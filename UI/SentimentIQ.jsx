@@ -301,6 +301,7 @@ function DetailModal({ detail, signal, onClose }) {
         source: sourceName,
         label: (s.direction || "neutral").toUpperCase(),
         text: s.title || s.text?.slice(0, 120) || "",
+        url: s.url || "#",
       });
       if (uniqueSources.length >= 3) break;
     }
@@ -461,7 +462,17 @@ function DetailModal({ detail, signal, onClose }) {
                       {sig.label}
                     </span>
                   </div>
-                  <div className="text-xs font-sans text-[#8899aa] leading-relaxed">{sig.text}</div>
+                  <div className="text-xs font-sans text-[#8899aa] leading-relaxed mb-3">{sig.text}</div>
+                  {sig.url && sig.url !== "#" && (
+                    <a
+                      href={sig.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[10px] font-mono text-[#00c896] hover:text-[#00e0a8] hover:underline transition-colors"
+                    >
+                      → Read full article
+                    </a>
+                  )}
                 </div>
               ))}
             </div>

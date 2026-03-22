@@ -10,6 +10,7 @@ Startup:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import sys
@@ -27,6 +28,23 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 load_dotenv()
 
+# Add fast/ to path for agent models
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "fast"))
+
+try:
+    from models import ScraperOutput
+except ImportError:
+    ScraperOutput = None
+
+# ─── Agent config ───────────────────────────────────────────────────
+SENTIMENT_AGENT_ADDRESS: str = os.getenv("SENTIMENT_AGENT_ADDRESS", "")
+SIGNAL_ENGINE_ADDRESS: str = os.getenv("SIGNAL_ENGINE_ADDRESS", "")
+SENTIMENT_AGENT_PORT: int = int(os.getenv("SENTIMENT_AGENT_PORT", "8002"))
+SIGNAL_ENGINE_PORT: int = int(os.getenv("SIGNAL_ENGINE_PORT", "8003"))
+SENTIMENT_AGENT_HTTP_PORT: int = 8001  # HTTP interface on separate port
+SENTIMENT_AGENT_URL: str = f"http://localhost:{SENTIMENT_AGENT_HTTP_PORT}/score"
+USE_AGENTS: bool = bool(SENTIMENT_AGENT_ADDRESS and SIGNAL_ENGINE_ADDRESS)
+
 # ─── App ───────────────────────────────────────────────────────────
 app = FastAPI(title="SentimentIQ Demo API")
 
@@ -43,7 +61,11 @@ finbert_model = None
 finbert_tokenizer = None
 
 # ─── Config ────────────────────────────────────────────────────────
-NEWSDATA_API_KEY = os.getenv("NEWSDATA_API_KEY", "")
+# Support multiple API keys for rate limiting
+_api_keys_raw = os.getenv("NEWSDATA_API_KEY", "")
+NEWSDATA_API_KEYS: list[str] = [key.strip() for key in _api_keys_raw.split(",") if key.strip()]
+NEWSDATA_API_KEY = NEWSDATA_API_KEYS[0] if NEWSDATA_API_KEYS else ""  # Fallback for backwards compatibility
+_current_key_index = 0  # Track which key to use next
 
 DEMO_TICKERS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "GOOG", "JPM", "XOM", "UNH"]
 TARGET_ARTICLES = 50
@@ -112,11 +134,60 @@ async def score_text_async(text: str) -> dict[str, float]:
     return await asyncio.get_event_loop().run_in_executor(None, _score_text, text)
 
 
+# ─── Agent communication ─────────────────────────────────────────────
+
+async def send_to_sentiment_agent(articles: list[dict]) -> None:
+    """Send articles to sentiment_agent for scoring."""
+    if not SENTIMENT_AGENT_ADDRESS or not ScraperOutput:
+        print("[api] WARNING: Sentiment agent not configured or models unavailable")
+        return
+
+    async with httpx.AsyncClient() as client:
+        for article in articles:
+            try:
+                # Create ScraperOutput message
+                scraper_msg = ScraperOutput(
+                    ticker=article["ticker"],
+                    text=article["text"],
+                    source_name=article["source_name"],
+                    credibility_weight=article.get("credibility_weight", 0.8),
+                    scraped_at=article["scraped_at"],
+                    post_id=article.get("post_id", ""),
+                    source_type="news",
+                    title=article.get("title", ""),
+                    url=article.get("url", ""),
+                    published_at=article.get("published_at", ""),
+                )
+
+                # POST to sentiment agent HTTP endpoint
+                payload = scraper_msg.dict()
+                await client.post(
+                    SENTIMENT_AGENT_URL,
+                    json=payload,
+                    timeout=5,
+                )
+                print(f"[api] Sent article to sentiment_agent: {article['ticker']}")
+            except Exception as exc:
+                print(f"[api] Error sending to sentiment_agent: {exc}")
+
+
+# ─── API Key rotation helper ──────────────────────────────────────
+
+def _get_next_api_key() -> str:
+    """Get the next API key in rotation."""
+    global _current_key_index
+    if not NEWSDATA_API_KEYS:
+        return ""
+    key = NEWSDATA_API_KEYS[_current_key_index]
+    _current_key_index = (_current_key_index + 1) % len(NEWSDATA_API_KEYS)
+    return key
+
 # ─── NewsData fetcher (relaxed for 50 articles) ───────────────────
 
 async def fetch_articles(tickers: list[str], target: int = 50) -> list[dict]:
-    """Fetch up to `target` articles across the given tickers from NewsData.io."""
-    if not NEWSDATA_API_KEY:
+    """Fetch up to `target` articles across the given tickers from NewsData.io.
+    Rotates through multiple API keys to avoid rate limiting."""
+    if not NEWSDATA_API_KEYS:
         print("[api] WARNING: NEWSDATA_API_KEY not set – returning empty")
         return []
 
@@ -127,12 +198,31 @@ async def fetch_articles(tickers: list[str], target: int = 50) -> list[dict]:
         for ticker in tickers:
             if len(results) >= target:
                 break
+
+            # Get next API key (rotates through all available keys)
+            api_key = _get_next_api_key()
+            key_index = NEWSDATA_API_KEYS.index(api_key) + 1
+            key_count = len(NEWSDATA_API_KEYS)
+
             try:
                 resp = await client.get(
                     "https://newsdata.io/api/1/news",
-                    params={"apikey": NEWSDATA_API_KEY, "q": ticker, "language": "en"},
+                    params={"apikey": api_key, "q": ticker, "language": "en"},
                 )
+
+                # Check for rate limit error
+                if resp.status_code == 429:
+                    print(f"[api] Rate limited on key {key_index}/{key_count} for {ticker}. Retrying with next key...")
+                    # Try next key
+                    api_key = _get_next_api_key()
+                    key_index = NEWSDATA_API_KEYS.index(api_key) + 1
+                    resp = await client.get(
+                        "https://newsdata.io/api/1/news",
+                        params={"apikey": api_key, "q": ticker, "language": "en"},
+                    )
+
                 data = resp.json()
+                print(f"[api] Fetched articles for {ticker} (key {key_index}/{key_count})")
             except Exception as exc:
                 print(f"[api] fetch error for {ticker}: {exc}")
                 continue
@@ -243,6 +333,9 @@ def aggregate_scored(scored: list[dict]) -> dict:
 # ─── Cached result ────────────────────────────────────────────────
 _cached_result: dict[str, Any] | None = None
 
+# ─── Signal storage (from signal_engine) ───────────────────────────
+_signals: dict[str, dict] = {}  # ticker -> FinalSignal from signal_engine
+
 # ─── Watchlist (in-memory, no persistence) ────────────────────────
 _watchlist: dict[str, dict] = {}  # ticker -> signal dict
 
@@ -276,82 +369,136 @@ async def analyze():
     """
     Full demo pipeline:
     1. Fetch ~50 articles from NewsData across tickers
-    2. Score each with FinBERT
+    2. Score with agents (if configured) or local FinBERT
     3. Aggregate per-ticker into signals
     4. Return structured data for the frontend
     """
     global _cached_result
-
-    if finbert_model is None:
-        return {"error": "FinBERT not loaded yet — wait for startup to complete"}
 
     # Step 1: Fetch articles
     articles = await fetch_articles(DEMO_TICKERS, TARGET_ARTICLES)
     if not articles:
         return {"error": "No articles fetched — check NEWSDATA_API_KEY"}
 
-    # Step 2: Score with FinBERT
-    scored_articles: list[dict] = []
-    for art in articles:
-        try:
-            result = await score_text_async(art["text"])
-            scored_articles.append({
-                **art,
-                "score": result["score"],
-                "confidence": result["confidence"],
-                "direction": result["direction"],
-            })
-        except Exception as exc:
-            print(f"[api] scoring error: {exc}")
-            continue
+    print(f"[api] Fetched {len(articles)} articles")
 
-    print(f"[api] Scored {len(scored_articles)} articles")
+    # Step 2a: If agents configured, send to sentiment_agent
+    if USE_AGENTS:
+        print(f"[api] Using agents for scoring (sentiment_agent={SENTIMENT_AGENT_ADDRESS})")
+        # Clear old signals
+        _signals.clear()
+        # Send articles to sentiment_agent
+        await send_to_sentiment_agent(articles)
+        # Wait for signal_engine to aggregate and POST results
+        await asyncio.sleep(5)
 
-    # Step 3: Aggregate per-ticker
-    by_ticker: dict[str, list[dict]] = {}
-    for s in scored_articles:
-        by_ticker.setdefault(s["ticker"], []).append(s)
+        # Build signals from agent results
+        signals: list[dict] = []
+        for ticker in DEMO_TICKERS:
+            if ticker in _signals:
+                sig = _signals[ticker]
+                # Add sources from original articles
+                ticker_articles = [a for a in articles if a["ticker"] == ticker]
+                if not sig.get("sources"):
+                    sig["sources"] = [
+                        {
+                            "source_name": a["source_name"],
+                            "title": a["title"],
+                            "text": a["text"][:200],
+                            "url": a["url"],
+                            "score": "—",
+                            "confidence": "—",
+                            "direction": "—",
+                            "published_at": a["published_at"],
+                        }
+                        for a in ticker_articles
+                    ]
+                signals.append(sig)
 
-    signals: list[dict] = []
-    for ticker, group in by_ticker.items():
-        sig = aggregate_scored(group)
-        if sig:
-            # Attach supporting sources for detail view
-            sig["sources"] = [
-                {
-                    "source_name": a["source_name"],
-                    "title": a["title"],
-                    "text": a["text"][:200],
-                    "url": a["url"],
-                    "score": round(a["score"], 4),
-                    "confidence": round(a["confidence"], 4),
-                    "direction": a["direction"],
-                    "published_at": a["published_at"],
-                }
-                for a in group
-            ]
-            signals.append(sig)
+        scored_articles = articles
+    else:
+        # Step 2b: Local FinBERT scoring (fallback)
+        print(f"[api] Using local FinBERT for scoring")
+        if finbert_model is None:
+            return {"error": "FinBERT not loaded yet — wait for startup to complete"}
+
+        scored_articles: list[dict] = []
+        for art in articles:
+            try:
+                result = await score_text_async(art["text"])
+                scored_articles.append({
+                    **art,
+                    "score": result["score"],
+                    "confidence": result["confidence"],
+                    "direction": result["direction"],
+                })
+            except Exception as exc:
+                print(f"[api] scoring error: {exc}")
+                continue
+
+        print(f"[api] Scored {len(scored_articles)} articles")
+
+        # Step 3: Aggregate per-ticker
+        by_ticker: dict[str, list[dict]] = {}
+        for s in scored_articles:
+            by_ticker.setdefault(s["ticker"], []).append(s)
+
+        signals: list[dict] = []
+        for ticker, group in by_ticker.items():
+            sig = aggregate_scored(group)
+            if sig:
+                # Attach supporting sources for detail view
+                sig["sources"] = [
+                    {
+                        "source_name": a["source_name"],
+                        "title": a["title"],
+                        "text": a["text"][:200],
+                        "url": a["url"],
+                        "score": round(a["score"], 4),
+                        "confidence": round(a["confidence"], 4),
+                        "direction": a["direction"],
+                        "published_at": a["published_at"],
+                    }
+                    for a in group
+                ]
+                signals.append(sig)
 
     signals.sort(key=lambda s: abs(s["aggregate_score"]), reverse=True)
 
     # Step 4: Build dashboard featured articles (first 3 strongest-signal articles)
-    all_scored_sorted = sorted(scored_articles, key=lambda a: abs(a["score"]), reverse=True)
     featured = []
-    seen_tickers = set()
-    for art in all_scored_sorted:
-        if art["ticker"] not in seen_tickers and len(featured) < 3:
-            seen_tickers.add(art["ticker"])
-            sig_for_ticker = next((s for s in signals if s["ticker"] == art["ticker"]), None)
+    # Only build featured from scored articles if they have scores
+    if scored_articles and "score" in scored_articles[0]:
+        all_scored_sorted = sorted(scored_articles, key=lambda a: abs(a["score"]), reverse=True)
+        seen_tickers = set()
+        for art in all_scored_sorted:
+            if art["ticker"] not in seen_tickers and len(featured) < 3:
+                seen_tickers.add(art["ticker"])
+                sig_for_ticker = next((s for s in signals if s["ticker"] == art["ticker"]), None)
+                featured.append({
+                    "ticker": art["ticker"],
+                    "company": TICKER_COMPANY.get(art["ticker"], art["ticker"]),
+                    "signal": sig_for_ticker["direction"] if sig_for_ticker else "HOLD",
+                    "confidence": round(sig_for_ticker["confidence_pct"] if sig_for_ticker else art["confidence"] * 100),
+                    "title": art["title"],
+                    "summary": art["text"][:180],
+                    "source": art["source_name"],
+                    "url": art["url"],
+                    "score": round(art["score"], 4),
+                })
+    else:
+        # Fallback: build from signals
+        for sig in signals[:3]:
             featured.append({
-                "ticker": art["ticker"],
-                "company": TICKER_COMPANY.get(art["ticker"], art["ticker"]),
-                "signal": sig_for_ticker["direction"] if sig_for_ticker else "HOLD",
-                "confidence": round(sig_for_ticker["confidence_pct"] if sig_for_ticker else art["confidence"] * 100),
-                "title": art["title"],
-                "summary": art["text"][:180],
-                "source": art["source_name"],
-                "url": art["url"],
-                "score": round(art["score"], 4),
+                "ticker": sig["ticker"],
+                "company": sig.get("company", sig["ticker"]),
+                "signal": sig["direction"],
+                "confidence": round(sig["confidence_pct"]),
+                "title": "—",
+                "summary": "—",
+                "source": "—",
+                "url": "#",
+                "score": sig["aggregate_score"],
             })
 
     # Step 5: Build sector aggregates for markets page
@@ -458,6 +605,16 @@ async def get_results():
     return _cached_result
 
 
+@app.post("/api/signals")
+async def receive_signal(payload: dict):
+    """Receive a FinalSignal from the signal_engine agent."""
+    ticker = payload.get("ticker")
+    if ticker:
+        _signals[ticker] = payload
+        print(f"[api] Received FinalSignal for {ticker}")
+    return {"ok": True}
+
+
 # ─── Watchlist endpoints ──────────────────────────────────────────
 
 class WatchlistAddRequest(BaseModel):
@@ -474,8 +631,8 @@ async def get_watchlist():
 async def watchlist_add(req: WatchlistAddRequest):
     """
     Add a ticker to the watchlist.
-    Validates the ticker, prevents duplicates, fetches news,
-    scores with FinBERT, and returns the signal.
+    Uses the same analysis pipeline as the dashboard to ensure consistent signals.
+    Fetches articles across all demo tickers, then returns the signal for the requested ticker.
     """
     ticker = req.ticker.strip().upper()
 
@@ -491,14 +648,20 @@ async def watchlist_add(req: WatchlistAddRequest):
     if finbert_model is None:
         return {"error": "FinBERT not loaded yet — wait for startup to complete."}
 
-    # Fetch articles for this single ticker
-    articles = await fetch_articles([ticker], target=10)
+    # Use the same article fetch as dashboard for consistency
+    # This ensures watchlist signals match dashboard signals
+    articles = await fetch_articles(DEMO_TICKERS, TARGET_ARTICLES)
     if not articles:
-        return {"error": f"No news articles found for '{ticker}'. Try a different ticker."}
+        return {"error": "Failed to fetch articles. Please try again later."}
+
+    # Filter articles to just this ticker
+    ticker_articles = [a for a in articles if a["ticker"] == ticker]
+    if not ticker_articles:
+        return {"error": f"No news articles found for '{ticker}' in this analysis. Try running the dashboard analysis first."}
 
     # Score with FinBERT
     scored: list[dict] = []
-    for art in articles:
+    for art in ticker_articles:
         try:
             result = await score_text_async(art["text"])
             scored.append({**art, **result})
