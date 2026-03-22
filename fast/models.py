@@ -11,6 +11,18 @@ class ScraperOutput(Model):
     credibility_weight: float       # 0.50-0.95 depending on source
     scraped_at: str
     post_id: str = ""
+    source_type: str = ""           # "news", "market_data", "social"
+    title: str = ""
+    url: str = ""
+    published_at: str = ""
+    raw_payload: dict = {}
+
+
+class AggregateRequest(Model):
+    """Sent by the orchestrator to the signal engine to trigger immediate aggregation."""
+    ticker: str
+    chat_session_id: str
+    requester_address: str          # where to send the FinalSignal back
 
 
 class SentimentScored(Model):
