@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from agents.models.config import ORCHESTRATOR_SEED
-from agents.models.models import SharedAgentState
-from agents.orchestrator.chat_protocol import chat_proto, generate_orchestrator_response_from_state
+from scrappers.models.config import ORCHESTRATOR_SEED
+from scrappers.models.models import SharedAgentState
+from scrappers.orchestrator.chat_protocol import chat_proto, generate_orchestrator_response_from_state
 from uagents import Agent, Context, Model
 from uagents_core.contrib.protocols.chat import ChatMessage, EndSessionContent, TextContent
 

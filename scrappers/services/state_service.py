@@ -1,4 +1,4 @@
-from agents.models.models import SharedAgentState
+from scrappers.models.models import SharedAgentState
 
 
 class InMemoryStateService:

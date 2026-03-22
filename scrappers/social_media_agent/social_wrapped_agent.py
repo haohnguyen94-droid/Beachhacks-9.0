@@ -1,5 +1,5 @@
-from agents.models.config import SOCIAL_SEED
-from agents.models.models import SharedAgentState
+from scrappers.models.config import SOCIAL_SEED
+from scrappers.models.models import SharedAgentState
 from uagents import Agent, Context
 
 social = Agent(
@@ -12,7 +12,7 @@ social = Agent(
 
 
 def social_workflow(state: SharedAgentState) -> SharedAgentState:
-    state.result = f"This is the Reddit Agent! Your message was: {state.query}"
+    state.result = f"This is the Social Media Agent, what do you need?"
     return state
 
 

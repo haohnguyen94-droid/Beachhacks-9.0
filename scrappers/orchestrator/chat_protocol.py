@@ -2,9 +2,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from uagents import Context, Protocol
-from agents.models.config import REDDIT_ADDRESS, X_ADDRESS, FINANCIAL_ADDRESS, YAHOO_ADDRESS, WALLSTREET_ADDRESS
-from agents.models.models import SharedAgentState
-from agents.services.state_service import state_service
+from scrappers.models.config import SOCIAL_ADDRESS, NEWS_ADDRESS
+from scrappers.models.models import SharedAgentState
+from scrappers.services.state_service import state_service
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -43,21 +43,12 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
 
     response = None
 
-    if "reddit" in text.lower():
-        await ctx.send(REDDIT_ADDRESS, state)
-        ctx.logger.info("Routing to reddit agent!")
-    elif "yahoo" in text.lower():
-        await ctx.send(YAHOO_ADDRESS, state)
-        ctx.logger.info("Routing to yahoo agent!")
-    elif "x" in text.lower():
-        await ctx.send(X_ADDRESS, state)
-        ctx.logger.info("Routing to x agent!")
-    elif "wallstreet" in text.lower():
-        await ctx.send(WALLSTREET_ADDRESS, state)
-        ctx.logger.info("Routing to wallstreet agent!")
-    elif "financialtimes" in text.lower():
-        await ctx.send(FINANCIAL_ADDRESS, state)
-        ctx.logger.info("Routing to financial agent!")
+    if "social agent" in text.lower():
+        await ctx.send(SOCIAL_ADDRESS, state)
+        ctx.logger.info("Routing to social agent!")
+    elif "news agent" in text.lower():
+        await ctx.send(NEWS_ADDRESS, state)
+        ctx.logger.info("Routing to news agent!")
     else:
         response = "Mention an agent name in your message and I'll route it to them."
 

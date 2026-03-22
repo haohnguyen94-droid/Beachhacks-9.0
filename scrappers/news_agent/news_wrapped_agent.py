@@ -1,9 +1,9 @@
-from agents.models.config import NEWS_SEED
-from agents.models.models import SharedAgentState
+from scrappers.models.config import NEWS_SEED
+from scrappers.models.models import SharedAgentState
 from uagents import Agent, Context
 
 news = Agent(
-    name="news",
+    name="news agent",
     seed=NEWS_SEED,
     port=8002,
     mailbox=True,
@@ -12,7 +12,7 @@ news = Agent(
 
 
 def news_workflow(state: SharedAgentState) -> SharedAgentState:
-    state.result = f"Yahoo agent, Your message was: {state.query}"
+    state.result = f"This is the news agent, what do you want?"
     return state
 
 

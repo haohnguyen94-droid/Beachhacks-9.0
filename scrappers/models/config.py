@@ -5,7 +5,7 @@ from uagents_core.identity import Identity
 load_dotenv(find_dotenv())
 
 SOCIAL_SEED = os.getenv("SOCIAL_SEED_PHRASE")
-NEWS_SEED = os.getenv("WALLSTREET_SEED_PHRASE")
+NEWS_SEED = os.getenv("NEWS_SEED_PHRASE")
 
 ORCHESTRATOR_SEED = os.getenv("ORCHESTRATOR_SEED_PHRASE")
 
