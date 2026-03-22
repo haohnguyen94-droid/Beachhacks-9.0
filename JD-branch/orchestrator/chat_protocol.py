@@ -1,27 +1,12 @@
-"""Chat protocol for the orchestrator.
-
-Accepts a ticker symbol (e.g. "AAPL") from the user via ASI:One / Agentverse
-chat, dispatches scrape requests to all scraper agents (mock + real API),
-collects their responses, triggers signal engine aggregation, and replies
-to the user with the final signal.
-"""
-
-from __future__ import annotations
-
 import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from uagents import Context, Protocol
-from scrappers.models.config import (
-    SOCIAL_ADDRESS,
-    NEWS_ADDRESS,
-    NEWSDATA_ADDRESS,
-    FINNHUB_ADDRESS,
-    SIGNAL_ENGINE_ADDRESS,
-)
-from scrappers.models.models import SharedAgentState
-from scrappers.services.state_service import state_service
+from models.config import NEWSDATA_ADDRESS, FINNHUB_ADDRESS, SIGNAL_ENGINE_ADDRESS, ORCHESTRATOR_SEED
+from uagents_core.identity import Identity
+from models.models import SharedAgentState, AggregateRequest
+from services.state_service import state_service
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
     ChatMessage,
@@ -30,36 +15,31 @@ from uagents_core.contrib.protocols.chat import (
     chat_protocol_spec,
 )
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "fast"))
-from models import AggregateRequest
-
 chat_proto = Protocol(spec=chat_protocol_spec)
 
-# Track how many agent responses we've received per session
+# Track scraper responses per session
 _pending_responses: dict[str, dict] = {}
 
-# Valid ticker pattern
+ORCHESTRATOR_ADDRESS: str = Identity.from_seed(seed=ORCHESTRATOR_SEED, index=0).address
+
 TICKER_RE = re.compile(r"^[A-Z]{1,5}$")
-
-SUPPORTED_TICKERS = {"AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "AMZN"}
-
-# All scraper agents to dispatch to
-SCRAPER_AGENTS = [
-    ("social_scraper", SOCIAL_ADDRESS),
-    ("news_scraper", NEWS_ADDRESS),
-    ("newsdata_scraper", NEWSDATA_ADDRESS),
-    ("finnhub_scraper", FINNHUB_ADDRESS),
-]
 
 
 def _extract_ticker(text: str) -> str | None:
-    """Try to extract a ticker symbol from the user's message."""
+    """Pull a valid ticker symbol out of the message, ignoring agent addresses."""
     for word in text.upper().split():
         cleaned = word.strip(".,!?")
-        if TICKER_RE.match(cleaned) and cleaned in SUPPORTED_TICKERS:
+        if cleaned.startswith("@AGENT") or cleaned.startswith("AGENT1Q"):
+            continue
+        if TICKER_RE.match(cleaned):
             return cleaned
     return None
+
+
+SCRAPER_AGENTS = [
+    ("newsdata_scraper", NEWSDATA_ADDRESS),
+    ("finnhub_scraper", FINNHUB_ADDRESS),
+]
 
 
 @chat_proto.on_message(ChatMessage)
@@ -84,20 +64,13 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
                 timestamp=datetime.now(tz=timezone.utc),
                 msg_id=uuid4(),
                 content=[
-                    TextContent(
-                        type="text",
-                        text=(
-                            f"Send me a ticker symbol to analyze. "
-                            f"Supported: {', '.join(sorted(SUPPORTED_TICKERS))}"
-                        ),
-                    ),
+                    TextContent(type="text", text=f"Could not find a valid ticker in: {text}"),
                     EndSessionContent(type="end-session"),
                 ],
             ),
         )
         return
 
-    # Create shared state with the ticker as the query
     state = SharedAgentState(
         chat_session_id=chat_session_id,
         query=ticker,
@@ -113,13 +86,12 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
         "expected": len(SCRAPER_AGENTS),
     }
 
-    # Dispatch to all scraper agents
+    # Dispatch ticker to all scraper agents
     for agent_name, agent_address in SCRAPER_AGENTS:
         await ctx.send(agent_address, state)
         ctx.logger.info(f"Dispatched {ticker} to {agent_name}")
 
-    # Acknowledge to user that analysis is in progress
-    scraper_names = ", ".join(name for name, _ in SCRAPER_AGENTS)
+    # Acknowledge to user
     await ctx.send(
         sender,
         ChatMessage(
@@ -128,7 +100,7 @@ async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
             content=[
                 TextContent(
                     type="text",
-                    text=f"Analyzing {ticker} — dispatched to {scraper_names}. Collecting data...",
+                    text=f"Analyzing {ticker} — dispatched to newsdata and finnhub scrapers. Collecting data...",
                 ),
             ],
         ),
@@ -141,7 +113,7 @@ async def handle_acknowledgement(ctx: Context, sender: str, msg: ChatAcknowledge
 
 
 async def collect_agent_response(ctx: Context, state: SharedAgentState) -> bool:
-    """Record an agent response. Returns True when all agents have replied and aggregation is triggered."""
+    """Record a scraper response. Returns True when all have replied and aggregation is triggered."""
     session = state.chat_session_id
     if session not in _pending_responses:
         return False
@@ -162,14 +134,12 @@ async def collect_agent_response(ctx: Context, state: SharedAgentState) -> bool:
         f"Triggering signal engine aggregation..."
     )
 
-    # Send aggregation request to signal engine
-    orchestrator_address = str(ctx.address)
     await ctx.send(
         SIGNAL_ENGINE_ADDRESS,
         AggregateRequest(
             ticker=ticker,
             chat_session_id=session,
-            requester_address=orchestrator_address,
+            requester_address=ORCHESTRATOR_ADDRESS,
         ),
     )
 
@@ -177,10 +147,8 @@ async def collect_agent_response(ctx: Context, state: SharedAgentState) -> bool:
 
 
 def get_pending_session(session_id: str) -> dict | None:
-    """Get pending session data (used by orchestrator to look up sender)."""
     return _pending_responses.get(session_id)
 
 
 def clear_pending_session(session_id: str) -> None:
-    """Clean up a completed session."""
     _pending_responses.pop(session_id, None)
