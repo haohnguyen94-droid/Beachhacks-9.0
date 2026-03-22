@@ -1,14 +1,8 @@
-reddit:
-	python -m agents.reddit_agent.reddit_wrapped_agent
+social:
+	python -m agents.social_media_agent.social_wrapped_agent
 
-financial:
-	python -m agents.financialtimes_agent.financialtimes_wrapped_agent
+news:
+	python -m agents.news_agent.news_wrapped_agent
 
-wallstreet:
-	python -m agents.wallstreet_agent.wallstreet_wrapped_agent
-
-x:
-	python -m agents.x_agent.x_wrapped_agent
-
-yahoo:
-	python -m agents.yahoo_agent.yahoo_wrapped_agent
+orchestrator:
+	python -m agents.orchestrator.orchestrator_fetchai_wrapped_agent
