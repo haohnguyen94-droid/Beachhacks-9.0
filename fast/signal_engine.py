@@ -1,5 +1,5 @@
 # Signal Engine — aggregates FinBERT sentiment scores per ticker over a
-# 15-minute window and produces a BUY / SELL / HOLD signal with confidence %.
+# configurable window and produces a BUY / SELL / HOLD signal with confidence %.
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 
+import httpx
 from dotenv import load_dotenv
 from uagents import Agent, Context
 
@@ -17,10 +18,10 @@ from models import FinalSignal, SentimentScored
 
 # Agent initialization
 
-DASHBOARD_AGENT_ADDRESS: str = os.getenv("DASHBOARD_AGENT_ADDRESS", "")
+DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8000")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 SIGNAL_ENGINE_PORT: int = int(os.getenv("SIGNAL_ENGINE_PORT", "8003"))
-AGGREGATION_INTERVAL: float = float(os.getenv("AGGREGATION_INTERVAL", "900.0"))  # 15 min
+AGGREGATION_INTERVAL: float = float(os.getenv("AGGREGATION_INTERVAL", "900.0"))
 
 agent = Agent(
     name="signal_engine",
@@ -32,6 +33,7 @@ agent = Agent(
 # Buffer: ticker -> list of SentimentScored messages
 message_buffer: dict[str, list[SentimentScored]] = {}
 buffer_locks: dict[str, asyncio.Lock] = {}
+seen_post_ids: dict[str, set[str]] = {}
 
 
 def _get_lock(ticker: str) -> asyncio.Lock:
@@ -39,6 +41,31 @@ def _get_lock(ticker: str) -> asyncio.Lock:
     if ticker not in buffer_locks:
         buffer_locks[ticker] = asyncio.Lock()
     return buffer_locks[ticker]
+
+
+# Send signal to dashboard API
+
+async def send_to_dashboard(signal: FinalSignal) -> None:
+    """POST a FinalSignal to the FastAPI dashboard."""
+    payload = {
+        "ticker": signal.ticker,
+        "direction": signal.direction,
+        "aggregate_score": signal.aggregate_score,
+        "confidence_pct": signal.confidence_pct,
+        "signal_strength": signal.signal_strength,
+        "source_count": signal.source_count,
+        "window_start": signal.window_start,
+        "window_end": signal.window_end,
+        "generated_at": signal.generated_at,
+        "source_breakdown": signal.source_breakdown,
+        "majority_direction": signal.majority_direction,
+        "directional_agreement_pct": signal.directional_agreement_pct,
+        "score_distribution": signal.score_distribution,
+        "forced_hold": signal.forced_hold,
+        "forced_hold_reason": signal.forced_hold_reason,
+    }
+    async with httpx.AsyncClient() as client:
+        await client.post(f"{DASHBOARD_URL}/signals", json=payload)
 
 
 # Database write
@@ -88,7 +115,6 @@ async def write_to_db(signal: FinalSignal) -> None:
         )
         await conn.close()
     except Exception as exc:
-        # Log handled at caller — just re-raise for the caller's try/except
         raise exc
 
 
@@ -98,10 +124,11 @@ async def write_to_db(signal: FinalSignal) -> None:
 async def startup(ctx: Context) -> None:
     ctx.logger.info(f"Signal engine address: {agent.address}")
     ctx.logger.info(f"Aggregation interval: {AGGREGATION_INTERVAL}s")
+    ctx.logger.info(f"Dashboard URL: {DASHBOARD_URL}")
     if DATABASE_URL:
         ctx.logger.info("DATABASE_URL set — will write signals to PostgreSQL.")
     else:
-        ctx.logger.warning("DATABASE_URL not set — signals will not be persisted.")
+        ctx.logger.warning("DATABASE_URL not set — signals will not be persisted to DB.")
 
 
 # Message handler — buffer incoming scores
@@ -111,6 +138,15 @@ async def handle_sentiment_scored(ctx: Context, sender: str, msg: SentimentScore
     try:
         lock = _get_lock(msg.ticker)
         async with lock:
+            # Deduplication
+            if msg.ticker not in seen_post_ids:
+                seen_post_ids[msg.ticker] = set()
+            if msg.post_id and msg.post_id in seen_post_ids[msg.ticker]:
+                ctx.logger.info(f"Skipping duplicate post_id={msg.post_id} for {msg.ticker}")
+                return
+            if msg.post_id:
+                seen_post_ids[msg.ticker].add(msg.post_id)
+
             if msg.ticker not in message_buffer:
                 message_buffer[msg.ticker] = []
             message_buffer[msg.ticker].append(msg)
@@ -135,6 +171,7 @@ async def aggregate_window(ctx: Context) -> None:
             lock = _get_lock(ticker)
             async with lock:
                 messages = message_buffer.pop(ticker, [])
+                seen_post_ids.pop(ticker, None)
 
             if not messages:
                 continue
@@ -153,11 +190,12 @@ async def aggregate_window(ctx: Context) -> None:
             except Exception as exc:
                 ctx.logger.error(f"DB write failed for {ticker}: {exc}")
 
-            # Forward to dashboard
-            if DASHBOARD_AGENT_ADDRESS:
-                await ctx.send(DASHBOARD_AGENT_ADDRESS, signal)
-            else:
-                ctx.logger.warning("DASHBOARD_AGENT_ADDRESS not set — signal not forwarded.")
+            # Forward to dashboard API
+            try:
+                await send_to_dashboard(signal)
+                ctx.logger.info(f"Sent {ticker} signal to dashboard.")
+            except Exception as exc:
+                ctx.logger.error(f"Dashboard POST failed for {ticker}: {exc}")
 
     except Exception as exc:
         ctx.logger.error(f"Error during aggregation: {exc}")
