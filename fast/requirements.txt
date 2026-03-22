@@ -4,5 +4,6 @@ uagents==0.17.1
 pydantic==2.8.2
 python-dotenv==1.0.1
 asyncpg==0.30.0
+httpx==0.28.1
 pytest==8.3.4
 pytest-asyncio==0.24.0
