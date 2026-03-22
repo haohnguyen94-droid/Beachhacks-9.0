@@ -2,18 +2,15 @@ from __future__ import annotations
 
 from uagents import Model
 
-class EntityExtracted(Model):
-    """Output of the NLP/SpaCy agent — input to the Sentiment scoring agent."""
+
+class ScraperOutput(Model):
+    """Output of the scraper agents — input to the Sentiment scoring agent."""
     ticker: str
-    company_name: str
-    context_window: str
-    ner_entities: list
-    sentiment_words: list
-    keywords: list
-    entity_verb_pairs: list
-    source_name: str
-    credibility_weight: float
+    text: str                       # raw post/article text
+    source_name: str                # "reddit", "wsj", "financial_times", "yahoo_finance"
+    credibility_weight: float       # 0.50-0.95 depending on source
     scraped_at: str
+    post_id: str = ""
 
 
 class SentimentScored(Model):
@@ -21,16 +18,31 @@ class SentimentScored(Model):
     ticker: str
     finbert_score: float
     finbert_confidence: float
-    llm_score: float | None = None
-    llm_confidence: float | None = None
     final_score: float
     final_confidence: float
-    direction: str
-    scoring_tier: int
-    ai_reasoning: str | None = None
+    direction: str                  # "positive", "negative", "neutral"
     source_name: str
     credibility_weight: float
-    ticker_context: str
-    keywords: list
+    text: str                       # original text that was scored
     scraped_at: str
     scored_at: str
+    post_id: str = ""
+
+
+class FinalSignal(Model):
+    """Output of the Signal Engine — sent to dashboard and written to DB."""
+    ticker: str
+    direction: str                      # "BUY", "SELL", "HOLD"
+    aggregate_score: float              # weighted mean, -1.0 to +1.0
+    confidence_pct: float               # 0.0 to 100.0
+    signal_strength: str                # "strong", "moderate", "weak"
+    source_count: int
+    window_start: str
+    window_end: str
+    generated_at: str
+    source_breakdown: dict              # per-category counts, scores, weight %
+    majority_direction: str             # "positive", "negative", "neutral"
+    directional_agreement_pct: float
+    score_distribution: dict            # {"positive": N, "negative": N, "neutral": N}
+    forced_hold: bool
+    forced_hold_reason: str | None = None
