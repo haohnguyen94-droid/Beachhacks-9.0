@@ -26,12 +26,16 @@ finbert_tokenizer: AutoTokenizer | None = None
 
 SIGNAL_ENGINE_ADDRESS: str = os.getenv("SIGNAL_ENGINE_ADDRESS", "")
 SENTIMENT_AGENT_PORT: int = int(os.getenv("SENTIMENT_AGENT_PORT", "8002"))
+SENTIMENT_AGENT_SEED: str = os.getenv("SENTIMENT_AGENT_SEED", "sentiment_agent_seed_phrase")
 
 agent = Agent(
     name="sentiment_agent",
-    seed="sentiment_agent_seed_phrase",
+    seed=SENTIMENT_AGENT_SEED,
     port=SENTIMENT_AGENT_PORT,
     endpoint=[f"http://localhost:{SENTIMENT_AGENT_PORT}/submit"],
+    mailbox=True,
+    publish_agent_details=True,
+    network="testnet",
 )
 
 

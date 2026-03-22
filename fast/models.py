@@ -11,6 +11,18 @@ class ScraperOutput(Model):
     credibility_weight: float       # 0.50-0.95 depending on source
     scraped_at: str
     post_id: str = ""
+    source_type: str = ""           # "news", "market_data", "social"
+    title: str = ""
+    url: str = ""
+    published_at: str = ""
+    raw_payload: dict = {}
+
+
+class AggregateRequest(Model):
+    """Sent by the orchestrator to the signal engine to trigger immediate aggregation."""
+    ticker: str
+    chat_session_id: str
+    requester_address: str          # where to send the FinalSignal back
 
 
 class SentimentScored(Model):
@@ -26,6 +38,19 @@ class SentimentScored(Model):
     text: str                       # original text that was scored
     scraped_at: str
     scored_at: str
+    post_id: str = ""
+
+
+class SourceEvidence(Model):
+    """A single source that contributed to the signal — shown to the user as supporting evidence."""
+    source_name: str                    # "reuters", "reddit", etc.
+    source_category: str                # "financial_media", "analyst", "social", "macro"
+    text: str                           # original article/post text (or snippet)
+    sentiment_score: float              # individual FinBERT score, -1.0 to +1.0
+    sentiment_direction: str            # "positive", "negative", "neutral"
+    confidence: float                   # FinBERT confidence, 0.0 to 1.0
+    credibility_weight: float           # source credibility, 0.50-0.95
+    scraped_at: str
     post_id: str = ""
 
 
@@ -46,3 +71,4 @@ class FinalSignal(Model):
     score_distribution: dict            # {"positive": N, "negative": N, "neutral": N}
     forced_hold: bool
     forced_hold_reason: str | None = None
+    supporting_sources: list[SourceEvidence] = []  # individual sources for user transparency

@@ -14,7 +14,7 @@ from uagents import Agent, Context
 load_dotenv()
 
 from aggregator import aggregate_signals
-from models import FinalSignal, SentimentScored
+from models import AggregateRequest, FinalSignal, SentimentScored
 
 # Agent initialization
 
@@ -22,12 +22,16 @@ DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8000")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 SIGNAL_ENGINE_PORT: int = int(os.getenv("SIGNAL_ENGINE_PORT", "8003"))
 AGGREGATION_INTERVAL: float = float(os.getenv("AGGREGATION_INTERVAL", "900.0"))
+SIGNAL_ENGINE_SEED: str = os.getenv("SIGNAL_ENGINE_SEED", "signal_engine_seed_phrase")
 
 agent = Agent(
     name="signal_engine",
-    seed="signal_engine_seed_phrase",
+    seed=SIGNAL_ENGINE_SEED,
     port=SIGNAL_ENGINE_PORT,
     endpoint=[f"http://localhost:{SIGNAL_ENGINE_PORT}/submit"],
+    mailbox=True,
+    publish_agent_details=True,
+    network="testnet",
 )
 
 # Buffer: ticker -> list of SentimentScored messages
@@ -63,6 +67,20 @@ async def send_to_dashboard(signal: FinalSignal) -> None:
         "score_distribution": signal.score_distribution,
         "forced_hold": signal.forced_hold,
         "forced_hold_reason": signal.forced_hold_reason,
+        "supporting_sources": [
+            {
+                "source_name": s.source_name,
+                "source_category": s.source_category,
+                "text": s.text,
+                "sentiment_score": s.sentiment_score,
+                "sentiment_direction": s.sentiment_direction,
+                "confidence": s.confidence,
+                "credibility_weight": s.credibility_weight,
+                "scraped_at": s.scraped_at,
+                "post_id": s.post_id,
+            }
+            for s in signal.supporting_sources
+        ],
     }
     async with httpx.AsyncClient() as client:
         await client.post(f"{DASHBOARD_URL}/signals", json=payload)
@@ -158,6 +176,49 @@ async def handle_sentiment_scored(ctx: Context, sender: str, msg: SentimentScore
         )
     except Exception as exc:
         ctx.logger.error(f"Error buffering message for {msg.ticker}: {exc}")
+
+
+# On-demand aggregation — triggered by the orchestrator after scrapers finish
+
+@agent.on_message(model=AggregateRequest)
+async def handle_aggregate_request(ctx: Context, sender: str, msg: AggregateRequest) -> None:
+    """Aggregate buffered scores for a ticker immediately and send FinalSignal back."""
+    ticker = msg.ticker
+    ctx.logger.info(f"Received AggregateRequest for {ticker} from {sender}")
+
+    # Wait briefly for any in-flight sentiment scores to arrive
+    await asyncio.sleep(5)
+
+    lock = _get_lock(ticker)
+    async with lock:
+        messages = message_buffer.pop(ticker, [])
+        seen_post_ids.pop(ticker, None)
+
+    if not messages:
+        ctx.logger.warning(f"No buffered messages for {ticker} — cannot aggregate.")
+        return
+
+    signal = aggregate_signals(messages)
+
+    ctx.logger.info(
+        f"On-demand signal {signal.ticker}: direction={signal.direction}, "
+        f"score={signal.aggregate_score}, confidence={signal.confidence_pct}%, "
+        f"sources={signal.source_count}"
+    )
+
+    # Send FinalSignal back to the requester (orchestrator)
+    await ctx.send(msg.requester_address, signal)
+    ctx.logger.info(f"Sent FinalSignal for {ticker} back to orchestrator.")
+
+    # Also write to dashboard and DB
+    try:
+        await send_to_dashboard(signal)
+    except Exception as exc:
+        ctx.logger.error(f"Dashboard POST failed for {ticker}: {exc}")
+    try:
+        await write_to_db(signal)
+    except Exception as exc:
+        ctx.logger.error(f"DB write failed for {ticker}: {exc}")
 
 
 # Interval handler — aggregate and emit signals

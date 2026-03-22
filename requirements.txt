@@ -1,0 +1,23 @@
+# Core agent framework
+uagents==0.24.0
+uagents-core>=0.3.8
+pydantic>=2.8.2
+
+# Sentiment analysis (FinBERT)
+transformers==4.46.3
+torch==2.6.0
+
+# Web / async
+fastapi>=0.115.0
+uvicorn>=0.30.0
+httpx==0.28.1
+
+# Database (optional — only needed if DATABASE_URL is set)
+asyncpg==0.30.0
+
+# Config
+python-dotenv==1.0.1
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.24.0
