@@ -22,12 +22,16 @@ DASHBOARD_URL: str = os.getenv("DASHBOARD_URL", "http://localhost:8000")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 SIGNAL_ENGINE_PORT: int = int(os.getenv("SIGNAL_ENGINE_PORT", "8003"))
 AGGREGATION_INTERVAL: float = float(os.getenv("AGGREGATION_INTERVAL", "900.0"))
+SIGNAL_ENGINE_SEED: str = os.getenv("SIGNAL_ENGINE_SEED", "signal_engine_seed_phrase")
 
 agent = Agent(
     name="signal_engine",
-    seed="signal_engine_seed_phrase",
+    seed=SIGNAL_ENGINE_SEED,
     port=SIGNAL_ENGINE_PORT,
     endpoint=[f"http://localhost:{SIGNAL_ENGINE_PORT}/submit"],
+    mailbox=True,
+    publish_agent_details=True,
+    network="testnet",
 )
 
 # Buffer: ticker -> list of SentimentScored messages
@@ -63,6 +67,20 @@ async def send_to_dashboard(signal: FinalSignal) -> None:
         "score_distribution": signal.score_distribution,
         "forced_hold": signal.forced_hold,
         "forced_hold_reason": signal.forced_hold_reason,
+        "supporting_sources": [
+            {
+                "source_name": s.source_name,
+                "source_category": s.source_category,
+                "text": s.text,
+                "sentiment_score": s.sentiment_score,
+                "sentiment_direction": s.sentiment_direction,
+                "confidence": s.confidence,
+                "credibility_weight": s.credibility_weight,
+                "scraped_at": s.scraped_at,
+                "post_id": s.post_id,
+            }
+            for s in signal.supporting_sources
+        ],
     }
     async with httpx.AsyncClient() as client:
         await client.post(f"{DASHBOARD_URL}/signals", json=payload)
